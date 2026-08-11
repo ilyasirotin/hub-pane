@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title><?= htmlspecialchars($pageTitle, ENT_QUOTES) ?> — HPane</title>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fomantic-ui@2.9.4/dist/semantic.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/fomantic-ui@2.9.4/dist/semantic.min.js"></script>
+</head>
+<?php $currentPath = rtrim(parse_url($requestUri ?? '/', PHP_URL_PATH) ?: '/', '/') ?: '/'; ?>
+<body>
+<div class="ui fixed inverted menu">
+    <div class="ui container">
+        <a href="/" class="header item">HPane</a>
+        <a href="/wireguard/configs" class="item <?= $currentPath === '/wireguard/configs' ? 'active' : '' ?>">Peer configs</a>
+        <a href="/wireguard" class="item <?= $currentPath === '/' || $currentPath === '/wireguard' ? 'active' : '' ?>">WireGuard</a>
+        <a href="/firewall" class="item <?= $currentPath === '/firewall' ? 'active' : '' ?>">Firewall</a>
+    </div>
+</div>
+
+<div class="ui main container" style="margin-top: 5em;">
+<?= $moduleContent ?>
+</div>
+
+<div class="ui inverted vertical footer segment">
+    <div class="ui container">
+        <p>&copy; <?= date('Y') ?> HubPane</p>
+    </div>
+</div>
+</body>
+</html>

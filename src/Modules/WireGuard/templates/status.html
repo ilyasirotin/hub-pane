@@ -1,0 +1,527 @@
+<style>
+  body { background: #f2f4f7; padding-bottom: 4rem; }
+
+  .ui.raised.segment { box-shadow: 0 2px 4px rgba(34, 36, 38, .12), 0 2px 10px rgba(34, 36, 38, .15); }
+
+  .toolbar { margin-bottom: 1.5rem; }
+  .toolbar .field { margin: 0; }
+
+  .table-scroll { overflow-x: auto; }
+  #interfaces table.ui.table { margin: 0; }
+  #interfaces thead th {
+    background: linear-gradient(180deg, #f4f5f7 0%, #e6e8ea 100%) !important;
+    white-space: nowrap;
+  }
+  #interfaces tbody td { vertical-align: top; }
+
+  .keytext {
+    font-family: Menlo, Consolas, monospace;
+    font-size: .78em;
+    color: rgba(0, 0, 0, .55);
+    overflow-wrap: anywhere;
+  }
+  .peer-name { font-weight: 700; }
+  .nowrap { white-space: nowrap; }
+  .transfer { line-height: 1.5; white-space: nowrap; }
+  .transfer .down { color: #21ba45; font-weight: 700; }
+  .transfer .up { color: #2185d0; font-weight: 700; }
+  .rate { color: rgba(0, 0, 0, .5); }
+
+  .legend .ui.label { margin-right: .25rem; }
+
+  @media (max-width: 767px) {
+    .ui.container { margin-left: 1em !important; margin-right: 1em !important; }
+  }
+</style>
+
+  <h1 class="ui header">
+    Peer status
+    <div class="sub header">Live view of <code>wg show</code>. The page holds one request open and updates as soon as anything changes.</div>
+  </h1>
+
+  <div class="ui icon info message">
+    <i class="info circle icon"></i>
+    <div class="content">
+      <div class="header">Simulated data</div>
+      <p>The polling loop runs against a local stub so the page can be reviewed on its own. Set <code>USE_STUB</code> to <code>false</code> to point it at the real endpoint.</p>
+    </div>
+  </div>
+
+  <div class="ui raised segment toolbar">
+    <div class="ui stackable two column grid">
+      <div class="column">
+        <div class="ui fluid icon input field">
+          <input type="search" id="search" placeholder="Filter by name, key, endpoint or IP" aria-label="Filter peers">
+          <i class="search icon"></i>
+        </div>
+      </div>
+      <div class="right aligned column">
+        <button class="ui button" id="btn-pause">Pause</button>
+      </div>
+    </div>
+
+    <div class="ui divider"></div>
+
+    <div class="ui stackable two column grid">
+      <div class="column legend">
+        <span class="ui green label">online &lt; 3 min</span>
+        <span class="ui yellow label">idle &lt; 10 min</span>
+        <span class="ui red label">stale</span>
+        <span class="ui label">never connected</span>
+      </div>
+      <div class="right aligned column">
+        <span class="ui basic label" id="conn-wrap">
+          <span class="ui grey empty circular label" id="conn-dot"></span>
+          &nbsp;<span id="conn-text">connecting</span>
+        </span>
+        <span class="ui basic label" id="summary">—</span>
+        <span class="ui basic label" id="updated">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="interfaces"></div>
+
+  <div class="ui basic segment" id="placeholder">
+    <div class="ui active inline loader"></div>
+    <span style="margin-left:.75rem">Waiting for the first response…</span>
+  </div>
+
+<script>
+/* ------------------------------------------------------------------
+   Long-poll client for peer status.
+
+   Request:  GET <POLL_URL>?since=<version>
+   The endpoint holds the request open and answers as soon as the state
+   fingerprint differs from `since`, otherwise it returns changed:false
+   after its own timeout and the client re-arms immediately.
+
+   Response shape:
+   {
+     "changed": true,
+     "version": "opaque fingerprint",
+     "timestamp": 1754800000,
+     "interfaces": [{
+       "name": "wg0",
+       "public_key": "...",
+       "listen_port": 51820,
+       "peers": [{
+         "public_key": "...",
+         "name": "ilya-phone",
+         "has_preshared_key": true,
+         "endpoint": "203.0.113.77:43521",
+         "allowed_ips": ["10.10.0.12/32"],
+         "latest_handshake": 1754799880,
+         "rx": 1234567,
+         "tx": 7654321,
+         "persistent_keepalive": 25
+       }]
+     }]
+   }
+   ------------------------------------------------------------------ */
+(function () {
+  "use strict";
+
+  const USE_STUB = true;            // false -> talk to POLL_URL
+  const POLL_URL = "status-api";    // real long-poll endpoint
+  const BACKOFF_MIN = 1000;
+  const BACKOFF_MAX = 15000;
+
+  const $ = sel => document.querySelector(sel);
+  const interfacesEl = $("#interfaces");
+  const placeholderEl = $("#placeholder");
+
+  const state = {
+    version: "",
+    interfaces: [],
+    query: "",
+    paused: false,
+    running: false,
+    receivedAt: 0,
+    counters: new Map(), // public key -> { rx, tx, t } from the previous payload
+    rates: new Map()     // public key -> { rx, tx } bytes per second
+  };
+
+  let controller = null;
+  let backoff = BACKOFF_MIN;
+
+  /* Fomantic carries the colour coding: row states tint the whole line, and
+     the circular label repeats it for scanning down the State column. */
+  const ROW_CLASS = { online: "positive", idle: "warning", offline: "negative", never: "disabled" };
+  const DOT_COLOR = { online: "green", idle: "yellow", offline: "red", never: "grey" };
+  const ORDER = { online: 0, idle: 1, offline: 2, never: 3 };
+
+  /* ---------- formatting ---------- */
+
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    const v = n / Math.pow(1024, i);
+    return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + " " + units[i];
+  }
+
+  function fmtRate(bytesPerSecond) {
+    if (!bytesPerSecond || bytesPerSecond < 1) return "—";
+    return fmtBytes(bytesPerSecond) + "/s";
+  }
+
+  function fmtAgo(unixSeconds) {
+    if (!unixSeconds) return "never";
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+    if (s < 60) return s + " s ago";
+    if (s < 3600) return Math.floor(s / 60) + " m ago";
+    if (s < 86400) return Math.floor(s / 3600) + " h " + Math.floor((s % 3600) / 60) + " m ago";
+    return Math.floor(s / 86400) + " d ago";
+  }
+
+  /** online < 3 min, idle < 10 min, otherwise stale. */
+  function peerState(unixSeconds) {
+    if (!unixSeconds) return "never";
+    const age = Math.floor(Date.now() / 1000) - unixSeconds;
+    if (age < 180) return "online";
+    if (age < 600) return "idle";
+    return "offline";
+  }
+
+  function shortKey(key) {
+    return key.length > 14 ? key.slice(0, 8) + "…" + key.slice(-4) : key;
+  }
+
+  function setConn(kind, text) {
+    const color = { live: "green", waiting: "yellow", error: "red", paused: "grey" }[kind] || "grey";
+    $("#conn-dot").className = "ui " + color + " empty circular label";
+    $("#conn-text").textContent = text;
+  }
+
+  /* ---------- rendering ---------- */
+
+  function applyPayload(data) {
+    const t = data.timestamp || Math.floor(Date.now() / 1000);
+
+    data.interfaces.forEach(iface => {
+      iface.peers.forEach(peer => {
+        const prev = state.counters.get(peer.public_key);
+        if (prev && t > prev.t) {
+          const dt = t - prev.t;
+          state.rates.set(peer.public_key, {
+            rx: Math.max(0, peer.rx - prev.rx) / dt,
+            tx: Math.max(0, peer.tx - prev.tx) / dt
+          });
+        }
+        state.counters.set(peer.public_key, { rx: peer.rx, tx: peer.tx, t });
+      });
+    });
+
+    state.interfaces = data.interfaces;
+    state.version = data.version;
+    state.receivedAt = Date.now();
+    render();
+  }
+
+  function matches(peer) {
+    const q = state.query.trim().toLowerCase();
+    if (!q) return true;
+    return (peer.name || "").toLowerCase().includes(q)
+      || peer.public_key.toLowerCase().includes(q)
+      || (peer.endpoint || "").toLowerCase().includes(q)
+      || peer.allowed_ips.join(" ").toLowerCase().includes(q);
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function render() {
+    placeholderEl.hidden = true;
+    interfacesEl.innerHTML = "";
+
+    let totalPeers = 0, onlinePeers = 0, rx = 0, tx = 0;
+
+    state.interfaces.forEach(iface => {
+      const segment = el("div", "ui raised segment");
+      segment.style.padding = "0";
+      segment.style.marginBottom = "1.5rem";
+
+      const head = el("div", "ui top attached inverted secondary segment");
+      head.style.borderRadius = ".28rem .28rem 0 0";
+      const title = el("span", "ui large text");
+      title.appendChild(el("strong", null, iface.name));
+      const badges = el("span");
+      badges.style.float = "right";
+      const port = el("span", "ui small basic label", "port " + iface.listen_port);
+      const count = el("span", "ui small basic label",
+        iface.peers.length + (iface.peers.length === 1 ? " peer" : " peers"));
+      count.title = iface.public_key;
+      badges.append(port, count);
+      head.append(title, badges);
+      segment.appendChild(head);
+
+      // Grouped by state, then by name: group changes are rare, so rows do not
+      // jump around on every counter update.
+      const peers = iface.peers.slice().sort((a, b) => {
+        const d = ORDER[peerState(a.latest_handshake)] - ORDER[peerState(b.latest_handshake)];
+        return d !== 0 ? d : (a.name || a.public_key).localeCompare(b.name || b.public_key);
+      });
+
+      const scroll = el("div", "table-scroll");
+      const table = el("table", "ui celled striped compact selectable unstackable table");
+      table.style.border = "0";
+      table.innerHTML =
+        "<thead>"
+        + "<tr>"
+        + "<th rowspan='2'>State</th>"
+        + "<th rowspan='2'>Peer</th>"
+        + "<th rowspan='2'>Endpoint</th>"
+        + "<th rowspan='2'>Allowed IPs</th>"
+        + "<th rowspan='2'>Handshake</th>"
+        + "<th colspan='2' class='center aligned'>Transfer</th>"
+        + "</tr>"
+        + "<tr><th>Total</th><th>Rate</th></tr>"
+        + "</thead>";
+
+      const tbody = document.createElement("tbody");
+
+      peers.forEach(peer => {
+        totalPeers++;
+        rx += peer.rx;
+        tx += peer.tx;
+        const st = peerState(peer.latest_handshake);
+        if (st === "online") onlinePeers++;
+        if (!matches(peer)) return;
+
+        const tr = el("tr", ROW_CLASS[st]);
+        tr.dataset.hsRow = String(peer.latest_handshake);
+
+        const tdState = el("td", "nowrap");
+        const dot = el("span", "ui " + DOT_COLOR[st] + " empty circular label");
+        dot.dataset.hsDot = String(peer.latest_handshake);
+        const label = el("span", null, " " + st);
+        label.dataset.hsLabel = String(peer.latest_handshake);
+        tdState.append(dot, label);
+        tr.appendChild(tdState);
+
+        const tdPeer = document.createElement("td");
+        tdPeer.appendChild(el("div", "peer-name", peer.name || "(unnamed)"));
+        const key = el("div", "keytext", shortKey(peer.public_key));
+        key.title = peer.public_key + (peer.has_preshared_key ? "\npreshared key: yes" : "");
+        tdPeer.appendChild(key);
+        if (peer.has_preshared_key) {
+          tdPeer.appendChild(el("span", "ui tiny basic label", "psk"));
+        }
+        tr.appendChild(tdPeer);
+
+        tr.appendChild(el("td", "keytext nowrap", peer.endpoint || "—"));
+        tr.appendChild(el("td", "keytext", peer.allowed_ips.join(", ") || "—"));
+
+        const tdHs = el("td", "nowrap", fmtAgo(peer.latest_handshake));
+        tdHs.dataset.hs = String(peer.latest_handshake);
+        if (peer.persistent_keepalive) tdHs.title = "keepalive " + peer.persistent_keepalive + " s";
+        tr.appendChild(tdHs);
+
+        const tdTransfer = el("td", "transfer");
+        tdTransfer.innerHTML = "<span class='down'>\u2193</span> " + fmtBytes(peer.rx)
+          + "<br><span class='up'>\u2191</span> " + fmtBytes(peer.tx);
+        tr.appendChild(tdTransfer);
+
+        const rate = state.rates.get(peer.public_key) || { rx: 0, tx: 0 };
+        const tdRate = el("td", "transfer rate");
+        tdRate.innerHTML = "\u2193 " + fmtRate(rate.rx) + "<br>\u2191 " + fmtRate(rate.tx);
+        tr.appendChild(tdRate);
+
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(tbody);
+      scroll.appendChild(table);
+      segment.appendChild(scroll);
+      interfacesEl.appendChild(segment);
+    });
+
+    $("#summary").textContent = onlinePeers + "/" + totalPeers + " peers online \u00b7 \u2193 "
+      + fmtBytes(rx) + " \u2191 " + fmtBytes(tx);
+    tickRelative();
+  }
+
+  /** Keeps "x s ago" and the row colours honest between payloads, without
+      rebuilding the table. */
+  function tickRelative() {
+    document.querySelectorAll("[data-hs]").forEach(node => {
+      node.textContent = fmtAgo(Number(node.dataset.hs));
+    });
+    document.querySelectorAll("[data-hs-row]").forEach(node => {
+      node.className = ROW_CLASS[peerState(Number(node.dataset.hsRow))];
+    });
+    document.querySelectorAll("[data-hs-dot]").forEach(node => {
+      node.className = "ui " + DOT_COLOR[peerState(Number(node.dataset.hsDot))] + " empty circular label";
+    });
+    document.querySelectorAll("[data-hs-label]").forEach(node => {
+      node.textContent = " " + peerState(Number(node.dataset.hsLabel));
+    });
+    if (state.receivedAt) {
+      const age = Math.round((Date.now() - state.receivedAt) / 1000);
+      $("#updated").textContent = "updated " + (age < 1 ? "just now" : age + " s ago");
+    }
+  }
+  setInterval(tickRelative, 1000);
+
+  /* ---------- transport ---------- */
+
+  function requestUpdate(since, signal) {
+    if (USE_STUB) return stubRequest(since, signal);
+
+    return fetch(POLL_URL + "?since=" + encodeURIComponent(since), {
+      signal,
+      cache: "no-store",
+      headers: { "Accept": "application/json" }
+    }).then(res => {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    });
+  }
+
+  /* ---------- long-poll loop ---------- */
+
+  async function loop() {
+    if (state.running) return;
+    state.running = true;
+
+    while (state.running) {
+      controller = new AbortController();
+      try {
+        setConn(state.version ? "live" : "waiting", state.version ? "live" : "connecting");
+
+        const data = await requestUpdate(state.version, controller.signal);
+        backoff = BACKOFF_MIN;
+
+        if (data.changed) {
+          applyPayload(data);
+        } else {
+          // Nothing moved during the server-side hold; re-arm immediately.
+          state.version = data.version || state.version;
+        }
+        setConn("live", "live");
+      } catch (err) {
+        if (err.name === "AbortError") break;   // paused, hidden, or leaving
+        setConn("error", "reconnecting in " + Math.round(backoff / 1000) + " s");
+        await sleep(backoff);
+        backoff = Math.min(BACKOFF_MAX, backoff * 2);
+      }
+    }
+
+    state.running = false;
+  }
+
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      const id = setTimeout(resolve, ms);
+      if (signal) {
+        signal.addEventListener("abort", () => {
+          clearTimeout(id);
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        }, { once: true });
+      }
+    });
+  }
+
+  function stop(reason) {
+    state.running = false;
+    if (controller) controller.abort();
+    setConn("paused", reason);
+  }
+
+  function start() {
+    if (state.paused) return;
+    loop();
+  }
+
+  /* ---------- lifecycle ---------- */
+
+  // Polling only runs while the page is being looked at, so a forgotten
+  // background tab does not hold a connection open forever.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop("paused (tab hidden)");
+    else start();
+  });
+
+  window.addEventListener("pagehide", () => stop("stopped"));
+
+  $("#btn-pause").addEventListener("click", e => {
+    state.paused = !state.paused;
+    e.target.textContent = state.paused ? "Resume" : "Pause";
+    e.target.className = state.paused ? "ui yellow button" : "ui button";
+    if (state.paused) stop("paused");
+    else start();
+  });
+
+  $("#search").addEventListener("input", e => { state.query = e.target.value; render(); });
+
+  /* ------------------------------------------------------------------
+     STUB — delete once the endpoint exists.
+     Imitates a held request: waits a couple of seconds, then either
+     reports movement or answers "nothing changed".
+     ------------------------------------------------------------------ */
+  const stub = {
+    version: 0,
+    peers: [
+      { public_key: "aWx5YS1sYXB0b3AtcHVibGljLWtleS1iYXNlNjQtcGFkPQ==", name: "ilya-laptop", has_preshared_key: true,  endpoint: "198.51.100.24:51820", allowed_ips: ["10.10.0.11/32"], rx: 4718592, tx: 1258291, persistent_keepalive: 25, active: true,  busy: true },
+      { public_key: "aWx5YS1waG9uZS1wdWJsaWMta2V5LWJhc2U2NC1wYWRkaW4=", name: "ilya-phone", has_preshared_key: false, endpoint: "203.0.113.77:43521",  allowed_ips: ["10.10.0.12/32"], rx: 981234,  tx: 342111,  persistent_keepalive: 25, active: true,  busy: false },
+      { public_key: "aGFwLWF4Mi1yb3V0ZXItcHVibGljLWtleS1iYXNlNjQtcGE=", name: "hap-ax2",     has_preshared_key: true,  endpoint: "192.0.2.9:13231",     allowed_ips: ["10.10.0.2/32", "192.168.89.0/24"], rx: 88234567, tx: 45123890, persistent_keepalive: 25, active: false, busy: false },
+      { public_key: "Z3Vlc3QtdGFibGV0LXB1YmxpYy1rZXktYmFzZTY0LXBhZGQ=", name: "",            has_preshared_key: false, endpoint: "",                    allowed_ips: ["10.10.0.50/32"], rx: 0,       tx: 0,       persistent_keepalive: 0,  active: false, busy: false, never: true }
+    ]
+  };
+
+  // One peer starts stale so the idle and offline styles are visible.
+  stub.peers.forEach(p => {
+    p.latest_handshake = p.never ? 0 : Math.floor(Date.now() / 1000) - (p.active ? 5 : 400);
+  });
+
+  async function stubRequest(since, signal) {
+    const hold = 1200 + Math.random() * 2600;
+    await sleep(hold, signal);
+
+    // Roughly every fourth response is a timeout with no movement.
+    if (Math.random() < 0.25) {
+      return { changed: false, version: since, timestamp: Math.floor(Date.now() / 1000) };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    stub.peers.forEach(p => {
+      if (!p.active) return;
+      p.latest_handshake = now - Math.floor(Math.random() * 20);
+      const scale = p.busy ? 220000 : 9000;
+      p.rx += Math.floor(scale * (hold / 1000) * (0.4 + Math.random()));
+      p.tx += Math.floor(scale * 0.35 * (hold / 1000) * (0.4 + Math.random()));
+    });
+
+    return {
+      changed: true,
+      version: String(++stub.version),
+      timestamp: now,
+      interfaces: [{
+        name: "wg0",
+        public_key: "c2VydmVyLXB1YmxpYy1rZXktYmFzZTY0LXBhZGRpbmc9PQ==",
+        listen_port: 51820,
+        peers: stub.peers.map(p => ({
+          public_key: p.public_key,
+          name: p.name,
+          has_preshared_key: p.has_preshared_key,
+          endpoint: p.endpoint,
+          allowed_ips: p.allowed_ips,
+          latest_handshake: p.latest_handshake,
+          rx: p.rx,
+          tx: p.tx,
+          persistent_keepalive: p.persistent_keepalive
+        }))
+      }]
+    };
+  }
+
+  start();
+})();
+</script>

@@ -1,0 +1,10 @@
+/.idea
+/vendor/
+/.vscode
+/.env
+/.DS_Store
+/compose.override.yml
+/var/*
+!/var/.gitkeep
+node_modules/
+public/css

@@ -1,0 +1,404 @@
+<!--
+  This fragment uses Fomantic's modal, accordion, checkbox and toast, plus the
+  qrcode-generator library loaded below. Vendor locally for an offline deployment:
+    curl -L -o vendor/qrcode.js https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js
+-->
+<style>
+  body { background: #f2f4f7; padding-bottom: 4rem; }
+
+  .ui.raised.segment,
+  #clients .ui.card { box-shadow: 0 2px 4px rgba(34, 36, 38, .12), 0 2px 10px rgba(34, 36, 38, .15); }
+  #clients .ui.card > .content.client-header {
+    background: linear-gradient(180deg, #f4f5f7 0%, #e6e8ea 100%);
+  }
+
+  .toolbar { margin-bottom: 1.5rem; }
+
+  .config-block + .config-block { border-top: 1px solid rgba(34, 36, 38, .12); }
+  .config-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: .6rem; }
+
+  /* QR stays black on white in any theme, or scanners struggle. */
+  .qr {
+    background: #fff;
+    border: 1px solid rgba(34, 36, 38, .2);
+    border-radius: .3rem;
+    padding: .35rem;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .9), 0 1px 3px rgba(0, 0, 0, .12);
+    cursor: zoom-in;
+    display: block;
+    width: 100%;
+  }
+  .qr:hover { border-color: rgba(34, 36, 38, .45); }
+  .qr:focus-visible { outline: 3px solid #2185d0; outline-offset: 2px; }
+  .qr svg { display: block; width: 100%; height: auto; }
+
+  .endpoint {
+    font-family: Menlo, Consolas, monospace;
+    font-size: .75em;
+    color: rgba(0, 0, 0, .5);
+    margin: .5rem 0;
+    overflow-wrap: anywhere;
+  }
+  .config-actions { margin-top: .5rem; }
+  .config-actions .ui.buttons { width: 100%; }
+
+  .ui.accordion .title { font-size: .82em; color: rgba(0, 0, 0, .5); padding: .4rem 0 !important; }
+  .ui.accordion pre {
+    background: #1b1c1d;
+    color: #d4d4d4;
+    padding: .7rem;
+    border-radius: .28rem;
+    font-size: .72rem;
+    max-height: 15rem;
+    overflow: auto;
+    margin: 0;
+  }
+
+  #zoom-qr { background: #fff; padding: .6rem; border-radius: .3rem; }
+  #zoom-qr svg { display: block; width: 100%; height: auto; }
+
+  @media print {
+    .no-print, .toolbar, .ui.message, .config-actions, .ui.accordion, .ui.modal { display: none !important; }
+    body { background: #fff; padding: 0; }
+    #clients .ui.card { box-shadow: none; border: 1px solid #999; break-inside: avoid; }
+  }
+</style>
+
+  <h1 class="ui header no-print">
+    Peer configs
+    <div class="sub header">Scan a code with the WireGuard app, or download the <code>.conf</code> file.</div>
+  </h1>
+
+  <div class="ui icon warning message no-print">
+    <i class="key icon"></i>
+    <div class="content">
+      <div class="header">These configs contain private keys</div>
+      <p>Keep this page behind authentication, and print or export only what you intend to hand over.</p>
+    </div>
+  </div>
+
+  <div class="ui raised segment toolbar no-print">
+    <div class="ui stackable two column grid">
+      <div class="column">
+        <div class="ui fluid icon input">
+          <input type="search" id="search" placeholder="Filter by client or config name" aria-label="Filter clients">
+          <i class="search icon"></i>
+        </div>
+      </div>
+      <div class="right aligned column">
+        <button class="ui button" id="btn-all"><i class="download icon"></i> Download all</button>
+        <button class="ui button" id="btn-print"><i class="print icon"></i> Print sheet</button>
+      </div>
+    </div>
+
+    <div class="ui divider"></div>
+
+    <div class="ui stackable two column grid">
+      <div class="column">
+        <div class="ui toggle checkbox">
+          <input type="checkbox" id="chk-reveal">
+          <label>Reveal keys in preview</label>
+        </div>
+      </div>
+      <div class="right aligned column">
+        <span class="ui basic label" id="status">—</span>
+        <span class="ui basic label">Press <kbd>/</kbd> to filter</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="ui stackable doubling three cards" id="clients"></div>
+
+  <div class="ui icon message" id="empty" style="display:none">
+    <i class="search icon"></i>
+    <div class="content"><div class="header">No clients match that filter</div></div>
+  </div>
+
+<div class="ui modal" id="zoom">
+  <div class="header" id="zoom-title"></div>
+  <div class="content">
+    <div id="zoom-qr"></div>
+  </div>
+  <div class="actions">
+    <button class="ui button" id="zoom-close">Close</button>
+    <button class="ui primary button" id="zoom-download"><i class="download icon"></i> Download config</button>
+  </div>
+</div>
+
+<!--
+  Template note: sample data for reviewing the layout. In the real page this
+  array is emitted by the backend, one entry per client with one or two
+  configs, each carrying its own download filename.
+-->
+<script id="clients-data" type="application/json">
+[
+  {
+    "name": "ilya-laptop",
+    "configs": [
+      {
+        "name": "home",
+        "filename": "ilya-laptop-ho.conf",
+        "text": "[Interface]\nPrivateKey = ODdRVEZFRkVGRkVGRkVGRkVGRkVGRkVGRkVGRkVGRkU9\nAddress = 10.10.0.11/32\nDNS = 10.10.0.1\n\n[Peer]\nPublicKey = cHViUEVFUktFWVBFRVJLRVlQRUVSS0VZUEVFUktFWT0=\nAllowedIPs = 10.10.0.0/24, 192.168.88.0/24\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25"
+      },
+      {
+        "name": "full-tunnel",
+        "filename": "ilya-laptop-fu.conf",
+        "text": "[Interface]\nPrivateKey = ODdRVEZFRkVGRkVGRkVGRkVGRkVGRkVGRkVGRkVGRkU9\nAddress = 10.10.0.11/32\nDNS = 10.10.0.1\n\n[Peer]\nPublicKey = cHViUEVFUktFWVBFRVJLRVlQRUVSS0VZUEVFUktFWT0=\nPresharedKey = cHNrUFNLUFNLUFNLUFNLUFNLUFNLUFNLUFNLUFNLUD0=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25"
+      }
+    ]
+  },
+  {
+    "name": "ilya-phone",
+    "configs": [
+      {
+        "name": "full-tunnel",
+        "filename": "ilya-phone.conf",
+        "text": "[Interface]\nPrivateKey = cGhvbmVLRVlLRVlLRVlLRVlLRVlLRVlLRVlLRVlLRVk9\nAddress = 10.10.0.12/32\nDNS = 10.10.0.1\n\n[Peer]\nPublicKey = cHViUEVFUktFWVBFRVJLRVlQRUVSS0VZUEVFUktFWT0=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25"
+      }
+    ]
+  },
+  {
+    "name": "guest-tablet",
+    "configs": [
+      {
+        "name": "lan-only",
+        "filename": "guest-tablet-l.conf",
+        "text": "[Interface]\nPrivateKey = Z3Vlc3RLRVlLRVlLRVlLRVlLRVlLRVlLRVlLRVlLRVk9\nAddress = 10.10.0.50/32\n\n[Peer]\nPublicKey = cHViUEVFUktFWVBFRVJLRVlQRUVSS0VZUEVFUktFWT0=\nAllowedIPs = 192.168.88.0/24\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25"
+      }
+    ]
+  },
+  {
+    "name": "hap-ax2-router",
+    "configs": [
+      {
+        "name": "site-to-site",
+        "filename": "hap-ax2-router.conf",
+        "text": "[Interface]\nPrivateKey = cm91dGVyS0VZS0VZS0VZS0VZS0VZS0VZS0VZS0VZS0U9\nAddress = 10.10.0.2/32\n\n[Peer]\nPublicKey = cHViUEVFUktFWVBFRVJLRVlQRUVSS0VZUEVFUktFWT0=\nPresharedKey = cHNrUFNLUFNLUFNLUFNLUFNLUFNLUFNLUFNLUFNLUD0=\nAllowedIPs = 10.10.0.0/24, 192.168.88.0/24\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25"
+      }
+    ]
+  }
+]
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script>
+/* QR codes are built in the browser, so config text never leaves the page. */
+(function () {
+  "use strict";
+
+  const $$ = sel => document.querySelector(sel);
+  const clientsEl = $$("#clients");
+  const emptyEl = $$("#empty");
+  const statusEl = $$("#status");
+
+  const clients = JSON.parse($$("#clients-data").textContent);
+  const state = { query: "", reveal: false };
+
+  if (window.qrcode && qrcode.stringToBytesFuncs && qrcode.stringToBytesFuncs["UTF-8"]) {
+    qrcode.stringToBytes = qrcode.stringToBytesFuncs["UTF-8"];
+  }
+
+  function maskSecrets(text) {
+    return text.replace(/^(\s*(?:PrivateKey|PresharedKey)\s*=\s*).+$/gim, "$1" + "\u2022".repeat(24));
+  }
+
+  function summarize(text) {
+    const grab = key => (text.match(new RegExp("^\\s*" + key + "\\s*=\\s*(.+)$", "im")) || [, ""])[1].trim();
+    return [grab("Address"), grab("Endpoint")].filter(Boolean).join(" \u2192 ");
+  }
+
+  function toast(msg) {
+    if (window.jQuery && jQuery.fn.toast) {
+      jQuery("body").toast({ message: msg, class: "black", displayTime: 2200, position: "bottom center" });
+    }
+  }
+
+  function downloadConfig(filename, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  async function copyConfig(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Config copied");
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      toast("Config copied");
+    }
+  }
+
+  function buildQr(text) {
+    if (typeof qrcode === "undefined") {
+      const p = document.createElement("p");
+      p.innerHTML = "<small>QR library did not load. Check the network, or vendor <code>qrcode.js</code> locally.</small>";
+      return p;
+    }
+    try {
+      const qr = qrcode(0, "L");
+      qr.addData(text);
+      qr.make();
+      const wrap = document.createElement("div");
+      wrap.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+      return wrap.firstElementChild;
+    } catch {
+      const p = document.createElement("p");
+      p.innerHTML = "<small>Config is too large for a single QR code. Use the download button instead.</small>";
+      return p;
+    }
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  /** One config: label, QR, endpoint line, buttons, collapsible raw text. */
+  function configBlock(client, config) {
+    const block = el("div", "content config-block");
+
+    const title = el("div", "config-title");
+    title.appendChild(el("span", "ui small teal label", config.name));
+    title.appendChild(el("span", "ui tiny basic label", config.filename));
+    block.appendChild(title);
+
+    const qrBox = document.createElement("button");
+    qrBox.className = "qr";
+    qrBox.type = "button";
+    qrBox.title = "Enlarge for easier scanning";
+    qrBox.setAttribute("aria-label", "Enlarge QR code for " + client.name + " / " + config.name);
+    qrBox.appendChild(buildQr(config.text));
+    qrBox.addEventListener("click", () => openZoom(client, config));
+    block.appendChild(qrBox);
+
+    block.appendChild(el("div", "endpoint", summarize(config.text)));
+
+    const actions = el("div", "config-actions no-print");
+    const buttons = el("div", "ui small buttons");
+
+    const dl = document.createElement("button");
+    dl.className = "ui primary button";
+    dl.innerHTML = "<i class='download icon'></i> Download";
+    dl.title = "Saves " + config.filename;
+    dl.addEventListener("click", () => downloadConfig(config.filename, config.text));
+
+    const copy = document.createElement("button");
+    copy.className = "ui basic button";
+    copy.innerHTML = "<i class='copy icon'></i> Copy";
+    copy.title = "Copy config text to clipboard";
+    copy.addEventListener("click", () => copyConfig(config.text));
+
+    buttons.append(dl, copy);
+    actions.appendChild(buttons);
+    block.appendChild(actions);
+
+    const acc = el("div", "ui accordion no-print");
+    const accTitle = el("div", "title");
+    accTitle.innerHTML = "<i class='dropdown icon'></i>Show config text";
+    const accContent = el("div", "content");
+    const pre = document.createElement("pre");
+    pre.textContent = state.reveal ? config.text : maskSecrets(config.text);
+    accContent.appendChild(pre);
+    acc.append(accTitle, accContent);
+    block.appendChild(acc);
+
+    return block;
+  }
+
+  function matches(client) {
+    const q = state.query.trim().toLowerCase();
+    return !q
+      || client.name.toLowerCase().includes(q)
+      || client.configs.some(c => c.name.toLowerCase().includes(q));
+  }
+
+  function render() {
+    clientsEl.innerHTML = "";
+    let shownClients = 0, shownConfigs = 0, totalConfigs = 0;
+
+    clients.forEach(client => {
+      totalConfigs += client.configs.length;
+      if (!matches(client)) return;
+
+      shownClients++;
+      shownConfigs += client.configs.length;
+
+      const card = el("div", "ui raised card");
+
+      const header = el("div", "content client-header");
+      header.appendChild(el("div", "header", client.name));
+      header.appendChild(el("div", "meta",
+        client.configs.length + (client.configs.length === 1 ? " config" : " configs")));
+      card.appendChild(header);
+
+      client.configs.forEach(cfg => card.appendChild(configBlock(client, cfg)));
+
+      clientsEl.appendChild(card);
+    });
+
+    emptyEl.style.display = shownClients > 0 ? "none" : "";
+    statusEl.textContent = shownClients + "/" + clients.length + " clients \u00b7 "
+      + shownConfigs + "/" + totalConfigs + " configs";
+
+    // Accordions live inside the rebuilt markup, so they are re-initialised here.
+    jQuery("#clients .ui.accordion").accordion({ exclusive: false });
+  }
+
+  /* ---- zoom modal ---- */
+  let zoomTarget = null;
+
+  function openZoom(client, config) {
+    zoomTarget = config;
+    $$("#zoom-title").textContent = client.name + " \u2014 " + config.name;
+    const box = $$("#zoom-qr");
+    box.innerHTML = "";
+    box.appendChild(buildQr(config.text));
+    jQuery("#zoom").modal("show");
+  }
+
+  $$("#zoom-close").addEventListener("click", () => jQuery("#zoom").modal("hide"));
+  $$("#zoom-download").addEventListener("click", () => {
+    if (zoomTarget) downloadConfig(zoomTarget.filename, zoomTarget.text);
+  });
+
+  /* ---- toolbar ---- */
+  jQuery(".ui.checkbox").checkbox();
+
+  $$("#search").addEventListener("input", e => { state.query = e.target.value; render(); });
+  $$("#chk-reveal").addEventListener("change", e => { state.reveal = e.target.checked; render(); });
+  $$("#btn-print").addEventListener("click", () => window.print());
+
+  $$("#btn-all").addEventListener("click", () => {
+    const jobs = [];
+    clients.filter(matches).forEach(client => {
+      client.configs.forEach(cfg => jobs.push([cfg.filename, cfg.text]));
+    });
+    if (!jobs.length) return toast("Nothing to download");
+    jobs.forEach(([f, t], i) => setTimeout(() => downloadConfig(f, t), i * 350));
+    toast("Downloading " + jobs.length + " files \u2014 allow multiple downloads if prompted");
+  });
+
+  document.addEventListener("keydown", e => {
+    const tag = document.activeElement.tagName;
+    if (e.key === "/" && tag !== "INPUT" && tag !== "TEXTAREA") {
+      e.preventDefault();
+      $$("#search").focus();
+    }
+  });
+
+  render();
+})();
+</script>

@@ -1,0 +1,21 @@
+{
+    "name": "threadnull/hub-pane",
+    "description": "WireGuard-based S2S network hub modular monitoring system",
+    "type": "project",
+    "require": {
+        "php": ">=8.4"
+    },
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "HubPane\\": "src/",
+            "Modules\\": "src/Modules/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Ilya Sirotin",
+            "email": "me@threadnull.com"
+        }
+    ]
+}

@@ -1,0 +1,970 @@
+<style>
+    body {
+        background: #f2f4f7;
+        padding-bottom: 4rem;
+    }
+
+    .ui.raised.segment {
+        box-shadow: 0 2px 4px rgba(34, 36, 38, .12), 0 2px 10px rgba(34, 36, 38, .15);
+    }
+
+    .toolbar {
+        margin-bottom: 1.5rem;
+    }
+
+    table.ui.table thead th {
+        background: linear-gradient(180deg, #f4f5f7 0%, #e6e8ea 100%) !important;
+        white-space: nowrap;
+    }
+
+    .table-scroll {
+        overflow-x: auto;
+    }
+
+    .mono {
+        font-family: Menlo, Consolas, monospace;
+        font-size: .78em;
+        overflow-wrap: anywhere;
+    }
+
+    .counters {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .counters .zero {
+        color: rgba(0, 0, 0, .3);
+    }
+
+    /* Netfilter hook map */
+    .hookmap {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: stretch;
+        gap: .5rem;
+    }
+
+    .hookmap .hook {
+        flex: 1 1 150px;
+        min-width: 150px;
+        background: #fff;
+        border: 1px solid rgba(34, 36, 38, .15);
+        border-top: 3px solid #767676;
+        border-radius: .28rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, .1);
+        padding: .6rem;
+    }
+
+    .hookmap .hook.used {
+        border-top-color: #2185d0;
+    }
+
+    .hookmap .hook-name {
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: .72rem;
+        letter-spacing: .05em;
+        color: rgba(0, 0, 0, .6);
+        margin-bottom: .4rem;
+    }
+
+    .hookmap .arrow {
+        align-self: center;
+        color: rgba(0, 0, 0, .25);
+        font-size: 1.3rem;
+        line-height: 1;
+    }
+
+    .hookmap .empty {
+        color: rgba(0, 0, 0, .3);
+        font-size: .78rem;
+    }
+
+    .hookmap .ui.label {
+        margin: 0 .2rem .2rem 0;
+    }
+
+    /* Policy routing chain */
+    .rulechain .step {
+        display: flex;
+        align-items: center;
+        gap: .75rem;
+        background: #fff;
+        border: 1px solid rgba(34, 36, 38, .15);
+        border-left: 4px solid #2185d0;
+        border-radius: .28rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+        padding: .5rem .75rem;
+        margin-bottom: .4rem;
+    }
+
+    .rulechain .step .prio {
+        font-family: Menlo, Consolas, monospace;
+        font-weight: 700;
+        color: rgba(0, 0, 0, .45);
+        min-width: 3.5rem;
+    }
+
+    .rulechain .step .selector {
+        flex: 1 1 auto;
+    }
+
+    .chain-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: .35rem;
+    }
+
+    .chain-head .name {
+        font-weight: 700;
+        margin-right: .35rem;
+    }
+
+    @media print {
+        .no-print, .toolbar {
+            display: none !important;
+        }
+
+        body {
+            background: #fff;
+        }
+    }
+</style>
+
+    <h1 class="ui header no-print">
+        Firewall &amp; routing
+        <div class="sub header">Current <code>nftables</code> ruleset and the routing configuration, as reported by the
+            host.
+        </div>
+    </h1>
+
+    <div class="ui icon info message no-print">
+        <i class="info circle icon"></i>
+        <div class="content">
+            <div class="header">Static sample data</div>
+            <p>The page renders the JSON in <code>#state-data</code>. Set <code>USE_STUB</code> to <code>false</code> to
+                fetch the same shape from <code>STATE_URL</code> instead.</p>
+        </div>
+    </div>
+
+    <div class="ui raised segment toolbar no-print">
+        <div class="ui stackable two column grid">
+            <div class="column">
+                <div class="ui fluid icon input">
+                    <input type="search" id="search" placeholder="Filter rules, routes, addresses, comments"
+                           aria-label="Filter">
+                    <i class="search icon"></i>
+                </div>
+            </div>
+            <div class="right aligned column">
+                <button class="ui button" id="btn-reload"><i class="sync icon"></i> Reload</button>
+            </div>
+        </div>
+
+        <div class="ui divider"></div>
+
+        <div class="ui stackable two column grid">
+            <div class="column">
+                <div class="ui toggle checkbox">
+                    <input type="checkbox" id="chk-active">
+                    <label>Only rules with traffic</label>
+                </div>
+            </div>
+            <div class="right aligned column">
+                <span class="ui basic label" id="summary">—</span>
+                <span class="ui basic label" id="generated">—</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="ui top attached tabular menu" id="tabs">
+        <a class="item active" data-tab="ruleset">nftables ruleset</a>
+        <a class="item" data-tab="routing">Routing</a>
+    </div>
+
+    <div class="ui bottom attached active tab segment" data-tab="ruleset">
+        <h3 class="ui header">Netfilter hooks</h3>
+        <p class="ui small text" style="color: rgba(0,0,0,.5)">Where each base chain attaches, in the order a packet
+            meets them.</p>
+        <div class="hookmap" id="hookmap"></div>
+        <div class="ui section divider"></div>
+        <div id="nft"></div>
+    </div>
+
+    <div class="ui bottom attached tab segment" data-tab="routing">
+        <h3 class="ui header">Rule lookup order</h3>
+        <p class="ui small text" style="color: rgba(0,0,0,.5)">Policy rules are evaluated by ascending priority; the
+            first match decides the table.</p>
+        <div class="rulechain" id="rulechain"></div>
+        <div class="ui section divider"></div>
+        <div id="routes"></div>
+    </div>
+
+<!--
+  Template note: sample data for reviewing the layout. The backend is expected
+  to normalise `nft -j list ruleset`, `ip -j route show table all` and
+  `ip -j rule show` into this shape, so the page stays free of vendor JSON
+  quirks:
+
+  {
+    "generated_at": <unix seconds>,
+    "nftables": {
+      "tables": [{
+        "family": "inet",              // ip | ip6 | inet | arp | bridge | netdev
+        "name": "filter",
+        "chains": [{
+          "name": "input",
+          "type": "filter",            // filter | nat | route; absent for regular chains
+          "hook": "input",             // absent for regular (jump target) chains
+          "priority": 0,
+          "policy": "drop",            // accept | drop; absent for regular chains
+          "rules": [{
+            "handle": 4,
+            "match": "ct state established,related",
+            "verdict": "accept",       // accept | drop | reject | jump X | goto X | return | continue | masquerade | dnat | snat
+            "packets": 1283712,
+            "bytes": 892374123,
+            "comment": "conntrack"
+          }]
+        }],
+        "sets": [{ "name": "admin_v4", "type": "ipv4_addr", "flags": ["interval"], "elements": ["..."] }]
+      }]
+    },
+    "routing": {
+      "rules": [{ "priority": 0, "selector": "from all", "action": "lookup local" }],
+      "tables": [{
+        "id": 254, "name": "main",
+        "routes": [{ "dst": "default", "gateway": "192.0.2.1", "dev": "eth0",
+                     "proto": "static", "scope": "global", "metric": 100 }]
+      }]
+    }
+  }
+-->
+<script id="state-data" type="application/json">
+    {
+        "generated_at": 1754809200,
+        "nftables": {
+            "tables": [
+                {
+                    "family": "inet",
+                    "name": "filter",
+                    "chains": [
+                        {
+                            "name": "input",
+                            "type": "filter",
+                            "hook": "input",
+                            "priority": 0,
+                            "policy": "drop",
+                            "rules": [
+                                {
+                                    "handle": 2,
+                                    "match": "ct state established,related",
+                                    "verdict": "accept",
+                                    "packets": 18234571,
+                                    "bytes": 21748392011,
+                                    "comment": "conntrack fast path"
+                                },
+                                {
+                                    "handle": 3,
+                                    "match": "ct state invalid",
+                                    "verdict": "drop",
+                                    "packets": 4127,
+                                    "bytes": 198344,
+                                    "comment": ""
+                                },
+                                {
+                                    "handle": 4,
+                                    "match": "iif lo",
+                                    "verdict": "accept",
+                                    "packets": 91233,
+                                    "bytes": 8813422,
+                                    "comment": "loopback"
+                                },
+                                {
+                                    "handle": 5,
+                                    "match": "ip protocol icmp icmp type { echo-request }",
+                                    "verdict": "accept",
+                                    "packets": 12844,
+                                    "bytes": 1078896,
+                                    "comment": "ping"
+                                },
+                                {
+                                    "handle": 6,
+                                    "match": "udp dport 51820",
+                                    "verdict": "accept",
+                                    "packets": 2288341,
+                                    "bytes": 3011882374,
+                                    "comment": "wireguard"
+                                },
+                                {
+                                    "handle": 7,
+                                    "match": "tcp dport 22 ip saddr @admin_v4",
+                                    "verdict": "accept",
+                                    "packets": 3312,
+                                    "bytes": 412877,
+                                    "comment": "ssh from admin nets"
+                                },
+                                {
+                                    "handle": 8,
+                                    "match": "tcp dport { 80, 443 }",
+                                    "verdict": "accept",
+                                    "packets": 774213,
+                                    "bytes": 98234112,
+                                    "comment": "reverse proxy"
+                                },
+                                {
+                                    "handle": 9,
+                                    "match": "iifname \"wg0\" tcp dport { 3000, 9090, 9093 }",
+                                    "verdict": "accept",
+                                    "packets": 44219,
+                                    "bytes": 18234771,
+                                    "comment": "grafana, prometheus, alertmanager over vpn"
+                                },
+                                {
+                                    "handle": 10,
+                                    "match": "tcp dport 22",
+                                    "verdict": "drop",
+                                    "packets": 288317,
+                                    "bytes": 17299020,
+                                    "comment": "ssh bruteforce from the internet"
+                                },
+                                {
+                                    "handle": 11,
+                                    "match": "meta l4proto { tcp, udp } th dport 5353",
+                                    "verdict": "drop",
+                                    "packets": 0,
+                                    "bytes": 0,
+                                    "comment": "leftover, candidate for removal"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "forward",
+                            "type": "filter",
+                            "hook": "forward",
+                            "priority": 0,
+                            "policy": "drop",
+                            "rules": [
+                                {
+                                    "handle": 12,
+                                    "match": "ct state established,related",
+                                    "verdict": "accept",
+                                    "packets": 9123441,
+                                    "bytes": 11238477120,
+                                    "comment": ""
+                                },
+                                {
+                                    "handle": 13,
+                                    "match": "iifname \"wg0\" oifname \"eth0\"",
+                                    "verdict": "jump wg_egress",
+                                    "packets": 1122388,
+                                    "bytes": 884123774,
+                                    "comment": "vpn to internet"
+                                },
+                                {
+                                    "handle": 14,
+                                    "match": "iifname \"wg0\" oifname \"wg0\"",
+                                    "verdict": "accept",
+                                    "packets": 88231,
+                                    "bytes": 12833771,
+                                    "comment": "peer to peer"
+                                },
+                                {
+                                    "handle": 15,
+                                    "match": "iifname \"eth0\" oifname \"wg0\"",
+                                    "verdict": "drop",
+                                    "packets": 1223,
+                                    "bytes": 88121,
+                                    "comment": "no unsolicited inbound"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "wg_egress",
+                            "rules": [
+                                {
+                                    "handle": 16,
+                                    "match": "ip daddr 10.0.0.0/8",
+                                    "verdict": "drop",
+                                    "packets": 812,
+                                    "bytes": 48720,
+                                    "comment": "no rfc1918 leaks out"
+                                },
+                                {
+                                    "handle": 17,
+                                    "match": "ip daddr 192.168.0.0/16",
+                                    "verdict": "drop",
+                                    "packets": 341,
+                                    "bytes": 20460,
+                                    "comment": ""
+                                },
+                                {
+                                    "handle": 18,
+                                    "match": "",
+                                    "verdict": "accept",
+                                    "packets": 1121235,
+                                    "bytes": 883954594,
+                                    "comment": ""
+                                }
+                            ]
+                        },
+                        {
+                            "name": "output",
+                            "type": "filter",
+                            "hook": "output",
+                            "priority": 0,
+                            "policy": "accept",
+                            "rules": []
+                        }
+                    ],
+                    "sets": [
+                        {
+                            "name": "admin_v4",
+                            "type": "ipv4_addr",
+                            "flags": [
+                                "interval"
+                            ],
+                            "elements": [
+                                "198.51.100.7",
+                                "203.0.113.0/24"
+                            ]
+                        },
+                        {
+                            "name": "blocklist",
+                            "type": "ipv4_addr",
+                            "flags": [
+                                "interval",
+                                "timeout"
+                            ],
+                            "elements": [
+                                "185.220.101.0/24",
+                                "45.155.205.0/24",
+                                "141.98.10.0/24"
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "family": "ip",
+                    "name": "nat",
+                    "chains": [
+                        {
+                            "name": "postrouting",
+                            "type": "nat",
+                            "hook": "postrouting",
+                            "priority": 100,
+                            "policy": "accept",
+                            "rules": [
+                                {
+                                    "handle": 19,
+                                    "match": "ip saddr 10.10.0.0/24 oifname \"eth0\"",
+                                    "verdict": "masquerade",
+                                    "packets": 1122388,
+                                    "bytes": 884123774,
+                                    "comment": "vpn clients to internet"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "prerouting",
+                            "type": "nat",
+                            "hook": "prerouting",
+                            "priority": -100,
+                            "policy": "accept",
+                            "rules": [
+                                {
+                                    "handle": 20,
+                                    "match": "iifname \"eth0\" tcp dport 32400",
+                                    "verdict": "dnat to 10.10.0.11:32400",
+                                    "packets": 8821,
+                                    "bytes": 1288344,
+                                    "comment": "media server"
+                                }
+                            ]
+                        }
+                    ],
+                    "sets": []
+                }
+            ]
+        },
+        "routing": {
+            "rules": [
+                {
+                    "priority": 0,
+                    "selector": "from all",
+                    "action": "lookup local"
+                },
+                {
+                    "priority": 100,
+                    "selector": "from 10.10.0.0/24 iif wg0",
+                    "action": "lookup wgclients"
+                },
+                {
+                    "priority": 110,
+                    "selector": "fwmark 0x33",
+                    "action": "lookup vpnout"
+                },
+                {
+                    "priority": 32766,
+                    "selector": "from all",
+                    "action": "lookup main"
+                },
+                {
+                    "priority": 32767,
+                    "selector": "from all",
+                    "action": "lookup default"
+                }
+            ],
+            "tables": [
+                {
+                    "id": 254,
+                    "name": "main",
+                    "routes": [
+                        {
+                            "dst": "default",
+                            "gateway": "192.0.2.1",
+                            "dev": "eth0",
+                            "proto": "static",
+                            "scope": "global",
+                            "metric": 100
+                        },
+                        {
+                            "dst": "10.10.0.0/24",
+                            "gateway": "",
+                            "dev": "wg0",
+                            "proto": "kernel",
+                            "scope": "link",
+                            "metric": 0
+                        },
+                        {
+                            "dst": "192.0.2.0/24",
+                            "gateway": "",
+                            "dev": "eth0",
+                            "proto": "kernel",
+                            "scope": "link",
+                            "metric": 100
+                        },
+                        {
+                            "dst": "192.168.88.0/24",
+                            "gateway": "10.10.0.2",
+                            "dev": "wg0",
+                            "proto": "static",
+                            "scope": "global",
+                            "metric": 0
+                        },
+                        {
+                            "dst": "192.168.89.0/24",
+                            "gateway": "10.10.0.2",
+                            "dev": "wg0",
+                            "proto": "static",
+                            "scope": "global",
+                            "metric": 0
+                        }
+                    ]
+                },
+                {
+                    "id": 100,
+                    "name": "wgclients",
+                    "routes": [
+                        {
+                            "dst": "default",
+                            "gateway": "192.0.2.1",
+                            "dev": "eth0",
+                            "proto": "static",
+                            "scope": "global",
+                            "metric": 0
+                        },
+                        {
+                            "dst": "10.10.0.0/24",
+                            "gateway": "",
+                            "dev": "wg0",
+                            "proto": "kernel",
+                            "scope": "link",
+                            "metric": 0
+                        }
+                    ]
+                },
+                {
+                    "id": 101,
+                    "name": "vpnout",
+                    "routes": [
+                        {
+                            "dst": "default",
+                            "gateway": "10.10.0.2",
+                            "dev": "wg0",
+                            "proto": "static",
+                            "scope": "global",
+                            "metric": 0
+                        }
+                    ]
+                },
+                {
+                    "id": 255,
+                    "name": "local",
+                    "routes": [
+                        {
+                            "dst": "10.10.0.1",
+                            "gateway": "",
+                            "dev": "wg0",
+                            "proto": "kernel",
+                            "scope": "host",
+                            "metric": 0
+                        },
+                        {
+                            "dst": "192.0.2.44",
+                            "gateway": "",
+                            "dev": "eth0",
+                            "proto": "kernel",
+                            "scope": "host",
+                            "metric": 0
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+</script>
+
+<script>
+    (function () {
+        "use strict";
+
+        const USE_STUB = true;          // false -> GET STATE_URL for the same JSON shape
+        const STATE_URL = "state-api";
+
+        const $$ = sel => document.querySelector(sel);
+        const state = {data: null, query: "", activeOnly: false};
+
+        /* Colour carries the meaning here: green lets traffic through, red stops it,
+           blue hands off to another chain or table. */
+        const VERDICT_COLOR = {
+            accept: "green", drop: "red", reject: "orange", return: "grey", continue: "grey",
+            masquerade: "teal", dnat: "violet", snat: "violet", jump: "blue", goto: "blue"
+        };
+        const ROW_CLASS = {accept: "positive", drop: "negative", reject: "warning"};
+        const HOOKS = ["prerouting", "input", "forward", "output", "postrouting"];
+
+        function verdictKey(verdict) {
+            return (verdict || "").split(/\s+/)[0].toLowerCase();
+        }
+
+        function fmtBytes(n) {
+            if (!n) return "0 B";
+            const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+            const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+            const v = n / Math.pow(1024, i);
+            return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + " " + units[i];
+        }
+
+        function fmtNum(n) {
+            return (n || 0).toLocaleString("en-US");
+        }
+
+        function el(tag, className, text) {
+            const node = document.createElement(tag);
+            if (className) node.className = className;
+            if (text !== undefined) node.textContent = text;
+            return node;
+        }
+
+        function label(color, text, extra) {
+            return el("span", "ui " + (color ? color + " " : "") + (extra || "") + " label", text);
+        }
+
+        function hit(haystack) {
+            const q = state.query.trim().toLowerCase();
+            return !q || haystack.toLowerCase().includes(q);
+        }
+
+        /* ---------- netfilter hook map ---------- */
+
+        function renderHookMap() {
+            const box = $$("#hookmap");
+            box.innerHTML = "";
+
+            // hook -> [{table, chain, priority, type}], ordered by priority like the kernel
+            const byHook = {};
+            HOOKS.forEach(h => (byHook[h] = []));
+            state.data.nftables.tables.forEach(table => {
+                table.chains.forEach(chain => {
+                    if (!chain.hook || !byHook[chain.hook]) return;
+                    byHook[chain.hook].push({
+                        table: table.name,
+                        family: table.family,
+                        chain: chain,
+                        priority: chain.priority
+                    });
+                });
+            });
+
+            HOOKS.forEach((hook, i) => {
+                const entries = byHook[hook].sort((a, b) => a.priority - b.priority);
+                const cell = el("div", "hook" + (entries.length ? " used" : ""));
+                cell.appendChild(el("div", "hook-name", hook));
+
+                if (!entries.length) {
+                    cell.appendChild(el("div", "empty", "no base chain"));
+                } else {
+                    entries.forEach(entry => {
+                        const tag = label(entry.chain.policy === "drop" ? "red" : "blue",
+                            entry.family + " " + entry.table + " / " + entry.chain.name, "tiny");
+                        tag.title = "type " + (entry.chain.type || "-")
+                            + ", priority " + entry.priority
+                            + ", policy " + (entry.chain.policy || "-");
+                        cell.appendChild(tag);
+                    });
+                }
+
+                box.appendChild(cell);
+                if (i < HOOKS.length - 1) box.appendChild(el("div", "arrow", "\u203a"));
+            });
+        }
+
+        /* ---------- nftables ---------- */
+
+        function chainHeader(table, chain) {
+            const head = el("div", "chain-head");
+            head.appendChild(el("span", "name", chain.name));
+
+            if (chain.hook) {
+                head.appendChild(label("blue", "hook " + chain.hook, "tiny"));
+                head.appendChild(label("", "type " + (chain.type || "filter"), "tiny basic"));
+                head.appendChild(label("", "priority " + chain.priority, "tiny basic"));
+                head.appendChild(label(chain.policy === "drop" ? "red" : "green", "policy " + chain.policy, "tiny"));
+            } else {
+                head.appendChild(label("", "regular chain", "tiny basic"));
+            }
+            head.appendChild(label("", chain.rules.length + (chain.rules.length === 1 ? " rule" : " rules"), "tiny basic"));
+            return head;
+        }
+
+        function ruleRow(rule) {
+            const key = verdictKey(rule.verdict);
+            const tr = el("tr", ROW_CLASS[key] || "");
+
+            tr.appendChild(el("td", "mono", "#" + rule.handle));
+            tr.appendChild(el("td", "mono", rule.match || "(any packet)"));
+
+            const tdVerdict = document.createElement("td");
+            tdVerdict.appendChild(label(VERDICT_COLOR[key] || "", rule.verdict, "small"));
+            tr.appendChild(tdVerdict);
+
+            const tdCounters = el("td", "counters");
+            const zero = !rule.packets;
+            tdCounters.innerHTML = "<span class='" + (zero ? "zero" : "") + "'>"
+                + fmtNum(rule.packets) + " pkts<br>" + fmtBytes(rule.bytes) + "</span>";
+            tr.appendChild(tdCounters);
+
+            const tdComment = el("td", null, rule.comment || "");
+            if (!rule.comment) tdComment.style.color = "rgba(0,0,0,.3)";
+            tr.appendChild(tdComment);
+
+            return tr;
+        }
+
+        function renderNft() {
+            const root = $$("#nft");
+            root.innerHTML = "";
+            let shownRules = 0;
+
+            state.data.nftables.tables.forEach(table => {
+                const segment = el("div", "ui raised segment");
+                segment.style.marginBottom = "1.5rem";
+
+                const header = el("h3", "ui header");
+                header.appendChild(document.createTextNode(table.family + " " + table.name));
+                const sub = el("div", "sub header",
+                    table.chains.length + " chains, " + table.sets.length + " sets");
+                header.appendChild(sub);
+                segment.appendChild(header);
+
+                table.chains.forEach(chain => {
+                    const rules = chain.rules.filter(rule => {
+                        if (state.activeOnly && !rule.packets) return false;
+                        return hit([chain.name, rule.match, rule.verdict, rule.comment].join(" "));
+                    });
+                    if (!rules.length && (state.query || state.activeOnly)) return;
+                    shownRules += rules.length;
+
+                    segment.appendChild(chainHeader(table, chain));
+
+                    if (!rules.length) {
+                        const note = el("div", "ui small text", "empty chain");
+                        note.style.cssText = "color: rgba(0,0,0,.35); margin: .4rem 0 1.2rem";
+                        segment.appendChild(note);
+                        return;
+                    }
+
+                    const scroll = el("div", "table-scroll");
+                    scroll.style.margin = ".5rem 0 1.5rem";
+                    const t = el("table", "ui celled compact striped unstackable table");
+                    t.innerHTML = "<thead><tr>"
+                        + "<th>Handle</th><th>Match</th><th>Verdict</th><th>Counters</th><th>Comment</th>"
+                        + "</tr></thead>";
+                    const tbody = document.createElement("tbody");
+                    rules.forEach(rule => tbody.appendChild(ruleRow(rule)));
+                    t.appendChild(tbody);
+                    scroll.appendChild(t);
+                    segment.appendChild(scroll);
+                });
+
+                if (table.sets.length) {
+                    segment.appendChild(el("h4", "ui header", "Sets"));
+                    table.sets.forEach(set => {
+                        const row = el("div");
+                        row.style.marginBottom = ".5rem";
+                        row.appendChild(label("purple", set.name, "small"));
+                        row.appendChild(label("", set.type, "small basic"));
+                        set.flags.forEach(flag => row.appendChild(label("", flag, "tiny basic")));
+                        const elements = el("div", "mono", set.elements.join(", "));
+                        elements.style.marginTop = ".25rem";
+                        row.appendChild(elements);
+                        segment.appendChild(row);
+                    });
+                }
+
+                root.appendChild(segment);
+            });
+
+            return shownRules;
+        }
+
+        /* ---------- routing ---------- */
+
+        function renderRuleChain() {
+            const root = $$("#rulechain");
+            root.innerHTML = "";
+
+            const known = new Set(state.data.routing.tables.map(t => t.name));
+
+            state.data.routing.rules
+                .slice()
+                .sort((a, b) => a.priority - b.priority)
+                .forEach(rule => {
+                    const step = el("div", "step");
+                    step.appendChild(el("span", "prio", String(rule.priority)));
+                    step.appendChild(el("span", "selector mono", rule.selector));
+
+                    const target = rule.action.replace(/^lookup\s+/, "");
+                    const color = known.has(target) ? "blue" : "grey";
+                    step.appendChild(label(color, rule.action, "small"));
+                    root.appendChild(step);
+                });
+        }
+
+        function renderRoutes() {
+            const root = $$("#routes");
+            root.innerHTML = "";
+            let shownRoutes = 0;
+
+            state.data.routing.tables.forEach(table => {
+                const routes = table.routes.filter(route =>
+                    hit([route.dst, route.gateway, route.dev, route.proto, table.name].join(" ")));
+                if (!routes.length && state.query) return;
+                shownRoutes += routes.length;
+
+                const segment = el("div", "ui raised segment");
+                segment.style.marginBottom = "1.5rem";
+
+                const header = el("h3", "ui header");
+                header.appendChild(document.createTextNode(table.name));
+                header.appendChild(el("div", "sub header", "table " + table.id));
+                segment.appendChild(header);
+
+                const scroll = el("div", "table-scroll");
+                const t = el("table", "ui celled compact striped unstackable table");
+                t.innerHTML = "<thead><tr>"
+                    + "<th>Destination</th><th>Via</th><th>Device</th><th>Proto</th><th>Scope</th><th>Metric</th>"
+                    + "</tr></thead>";
+                const tbody = document.createElement("tbody");
+
+                routes.forEach(route => {
+                    // The default route is the one worth spotting first in any table.
+                    const tr = el("tr", route.dst === "default" ? "warning" : "");
+                    const tdDst = document.createElement("td");
+                    if (route.dst === "default") {
+                        tdDst.appendChild(label("orange", "default", "small"));
+                    } else {
+                        tdDst.className = "mono";
+                        tdDst.textContent = route.dst;
+                    }
+                    tr.appendChild(tdDst);
+
+                    tr.appendChild(el("td", "mono", route.gateway || "—"));
+
+                    const tdDev = document.createElement("td");
+                    tdDev.appendChild(label("", route.dev, "small basic"));
+                    tr.appendChild(tdDev);
+
+                    tr.appendChild(el("td", null, route.proto));
+                    tr.appendChild(el("td", null, route.scope));
+                    tr.appendChild(el("td", "counters", String(route.metric)));
+                    tbody.appendChild(tr);
+                });
+
+                t.appendChild(tbody);
+                scroll.appendChild(t);
+                segment.appendChild(scroll);
+                root.appendChild(segment);
+            });
+
+            return shownRoutes;
+        }
+
+        /* ---------- page ---------- */
+
+        function render() {
+            renderHookMap();
+            const rules = renderNft();
+            renderRuleChain();
+            const routes = renderRoutes();
+
+            $$("#summary").textContent = rules + " rules \u00b7 " + routes + " routes \u00b7 "
+                + state.data.routing.rules.length + " policy rules";
+            $$("#generated").textContent = "generated "
+                + new Date(state.data.generated_at * 1000).toLocaleString();
+        }
+
+        async function load() {
+            if (USE_STUB) {
+                state.data = JSON.parse($$("#state-data").textContent);
+                render();
+                return;
+            }
+            try {
+                const res = await fetch(STATE_URL, {cache: "no-store", headers: {"Accept": "application/json"}});
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                state.data = await res.json();
+                render();
+            } catch (err) {
+                jQuery("body").toast({message: "Could not load state: " + err.message, class: "error"});
+            }
+        }
+
+        /* ---------- controls ---------- */
+
+        jQuery("#tabs .item").tab();
+        jQuery(".ui.checkbox").checkbox();
+
+        $$("#search").addEventListener("input", e => {
+            state.query = e.target.value;
+            render();
+        });
+        $$("#chk-active").addEventListener("change", e => {
+            state.activeOnly = e.target.checked;
+            render();
+        });
+        $$("#btn-reload").addEventListener("click", load);
+
+        document.addEventListener("keydown", e => {
+            const tag = document.activeElement.tagName;
+            if (e.key === "/" && tag !== "INPUT" && tag !== "TEXTAREA") {
+                e.preventDefault();
+                $$("#search").focus();
+            }
+        });
+
+        load();
+    })();
+</script>
